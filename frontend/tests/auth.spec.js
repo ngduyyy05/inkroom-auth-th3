@@ -1,0 +1,86 @@
+import { test, expect } from '@playwright/test'
+
+test('API validates, persists users, verifies passwords and revokes sessions', async ({ request }) => {
+  const email = `api-${Date.now()}@example.com`
+  const password = 'Inkroom123!'
+  const endpoint = 'http://localhost:5000/api/auth'
+  expect((await request.post(`${endpoint}/register`, { data: { email: 'invalid', password: '123' } })).status()).toBe(400)
+  const created = await request.post(`${endpoint}/register`, { data: { email, password } })
+  expect(created.status()).toBe(201)
+  expect(JSON.stringify(await created.json())).not.toContain('password')
+  expect((await request.post(`${endpoint}/register`, { data: { email: email.toUpperCase(), password } })).status()).toBe(409)
+  expect((await request.post(`${endpoint}/login`, { data: { email, password: 'wrong-password' } })).status()).toBe(401)
+  expect((await request.post(`${endpoint}/login`, { data: { email: 'missing@example.com', password } })).status()).toBe(401)
+  const loggedIn = await request.post(`${endpoint}/login`, { data: { email: email.toUpperCase(), password } })
+  expect(loggedIn.ok()).toBeTruthy()
+  const session = await loggedIn.json()
+  const headers = { Authorization: `Bearer ${session.token}` }
+  expect((await request.get(`${endpoint}/me`)).status()).toBe(401)
+  expect((await request.get(`${endpoint}/me`, { headers: { Authorization: `Bearer ${'a'.repeat(64)}` } })).status()).toBe(401)
+  expect((await (await request.get(`${endpoint}/me`, { headers })).json()).email).toBe(email)
+  expect((await request.post(`${endpoint}/logout`, { headers })).status()).toBe(204)
+  expect((await request.get(`${endpoint}/me`, { headers })).status()).toBe(401)
+})
+
+test('registration, login, Context restoration, protected booking and logout', async ({ page, context }, testInfo) => {
+  const email = `browser-${Date.now()}@example.com`
+  const password = 'Inkroom123!'
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message))
+  await page.goto('/booking')
+  await expect(page).toHaveURL(/\/login$/)
+  await page.getByRole('link', { name: 'Đăng ký ngay' }).click()
+  await page.getByLabel('Email', { exact: true }).fill('invalid')
+  await page.getByLabel('Mật khẩu', { exact: true }).fill('123')
+  await page.getByRole('button', { name: 'Tạo tài khoản' }).click()
+  await expect(page.getByText('Vui lòng nhập email hợp lệ.')).toBeVisible()
+  await page.getByLabel('Email', { exact: true }).fill(email)
+  await page.getByLabel('Mật khẩu', { exact: true }).fill(password)
+  await page.getByLabel('Xác nhận mật khẩu').fill('different')
+  await page.getByRole('button', { name: 'Tạo tài khoản' }).click()
+  await expect(page.getByText('Mật khẩu xác nhận không khớp.')).toBeVisible()
+  await page.getByLabel('Xác nhận mật khẩu').fill(password)
+  await page.getByRole('button', { name: 'Tạo tài khoản' }).click()
+  await expect(page.getByRole('status')).toContainText('Đăng ký thành công')
+  await page.getByLabel('Email', { exact: true }).fill(email)
+  await page.getByLabel('Mật khẩu', { exact: true }).fill('wrong-password')
+  await page.getByRole('button', { name: 'Đăng nhập', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('Email hoặc mật khẩu không chính xác')
+  await page.getByLabel('Mật khẩu', { exact: true }).fill(password)
+  await page.getByRole('button', { name: 'Đăng nhập', exact: true }).click()
+  await expect(page).toHaveURL(/\/booking$/)
+  await expect(page.getByLabel('Email', { exact: true })).toHaveValue(email)
+  const session = await page.evaluate(() => JSON.parse(localStorage.getItem('inkroom-auth')))
+  expect(session.user.email).toBe(email)
+  expect(JSON.stringify(session)).not.toContain(password)
+  await page.reload()
+  await expect(page.getByLabel('Email', { exact: true })).toHaveValue(email)
+  await page.goto('/account')
+  await expect(page.getByText(email, { exact: true })).toBeVisible()
+  await expect(page.getByRole('navigation').getByRole('link', { name: 'Tài khoản', exact: true })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('account-desktop.png'), fullPage: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy()
+  const second = await context.newPage()
+  await second.goto('/account')
+  await expect(second.getByText(email, { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Đăng xuất', exact: true }).click()
+  await expect(page).toHaveURL(/\/login$/)
+  await expect(second).toHaveURL(/\/login$/)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy()
+  await page.screenshot({ path: testInfo.outputPath('login-mobile.png'), fullPage: true })
+  expect(await page.evaluate(() => localStorage.getItem('inkroom-auth'))).toBeNull()
+  await page.goto('/account')
+  await expect(page).toHaveURL(/\/login$/)
+  expect(errors).toEqual([])
+})
+
+test('corrupt, forged and expired local sessions cannot open account', async ({ page }) => {
+  await page.goto('/login')
+  for (const value of ['{broken', JSON.stringify({ token: 'a'.repeat(64), expiresAt: '2000-01-01' }), JSON.stringify({ token: 'a'.repeat(64), expiresAt: '2099-01-01', user: { email: 'forged@example.com' } })]) {
+    await page.evaluate(value => localStorage.setItem('inkroom-auth', value), value)
+    await page.goto('/account')
+    await expect(page).toHaveURL(/\/login$/)
+    expect(await page.evaluate(() => localStorage.getItem('inkroom-auth'))).toBeNull()
+  }
+})

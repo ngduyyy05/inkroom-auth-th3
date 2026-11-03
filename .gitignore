@@ -1,0 +1,13 @@
+**/node_modules/
+**/dist/
+**/bin/
+**/obj/
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/.env.local
+reference-th2/
+.source-history/
+artifacts/
+**/test-results/
+**/playwright-report/
